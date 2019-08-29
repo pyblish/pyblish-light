@@ -39,9 +39,11 @@ Todo:
     the first time to understand how to actually to it!
 
 """
+
+import logging
 from functools import partial
 
-from . import delegate, model, settings, util, view
+from . import delegate, model, settings, util, view, tree
 from .awesome import tags as awesome
 
 from .vendor.Qt import QtCore, QtGui, QtWidgets
@@ -55,7 +57,8 @@ class Window(QtWidgets.QDialog):
                             QtCore.Qt.WindowTitleHint |
                             QtCore.Qt.WindowMaximizeButtonHint |
                             QtCore.Qt.WindowMinimizeButtonHint |
-                            QtCore.Qt.WindowCloseButtonHint)
+                            QtCore.Qt.WindowCloseButtonHint |
+                            QtCore.Qt.Window)
         self.setWindowIcon(icon)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
 
@@ -111,6 +114,7 @@ class Window(QtWidgets.QDialog):
         artist_page = QtWidgets.QWidget()
 
         artist_view = view.Item()
+        artist_view.show_perspective.connect(self.toggle_perspective_widget)
 
         artist_delegate = delegate.Artist()
         artist_view.setItemDelegate(artist_delegate)
@@ -134,10 +138,10 @@ class Window(QtWidgets.QDialog):
 
         overview_page = QtWidgets.QWidget()
 
-        left_view = view.Item()
-        right_view = view.Item()
+        left_view = tree.View()
+        right_view = tree.View()
 
-        item_delegate = delegate.Item()
+        item_delegate = delegate.ItemAndSection()
         left_view.setItemDelegate(item_delegate)
         right_view.setItemDelegate(item_delegate)
 
@@ -162,9 +166,16 @@ class Window(QtWidgets.QDialog):
 
         terminal_container = QtWidgets.QWidget()
 
-        terminal_delegate = delegate.Terminal()
-        terminal_view = view.LogView()
+        terminal_delegate = delegate.LogsAndDetails()
+        terminal_view = view.TerminalView()
         terminal_view.setItemDelegate(terminal_delegate)
+
+        terminal_model = model.Terminal()
+
+        terminal_proxy = model.TerminalProxy()
+        terminal_proxy.setSourceModel(terminal_model)
+
+        terminal_view.setModel(terminal_proxy)
 
         layout = QtWidgets.QVBoxLayout(terminal_container)
         layout.addWidget(terminal_view)
@@ -278,16 +289,27 @@ class Window(QtWidgets.QDialog):
                                           QtWidgets.QSizePolicy.Expanding)
         closing_placeholder.hide()
 
+        self.last_persp_index = None
+        self.perspective_widget = view.PerspectiveWidget(self)
+        self.perspective_widget.hide()
+
         # Main layout
-        layout = QtWidgets.QVBoxLayout(self)
+        self.main_widget = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(self.main_widget)
         layout.addWidget(header, 0)
         layout.addWidget(body, 3)
+        layout.addWidget(self.perspective_widget, 3)
         layout.addWidget(closing_placeholder, 1)
         layout.addWidget(comment_box, 0)
         layout.addWidget(footer, 0)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        self.main_widget.setLayout(layout)
 
+        self.main_layout = QtWidgets.QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        self.main_layout.addWidget(self.main_widget)
         """Animation
            ___
           /   \
@@ -356,14 +378,20 @@ class Window(QtWidgets.QDialog):
 
         instance_model = model.Instance()
         plugin_model = model.Plugin()
-        terminal_model = model.Terminal()
 
         filter_model = model.ProxyModel(plugin_model)
 
         artist_view.setModel(instance_model)
-        left_view.setModel(instance_model)
-        right_view.setModel(filter_model)
-        terminal_view.setModel(terminal_model)
+
+        left_proxy = tree.FamilyGroupProxy()
+        left_proxy.setSourceModel(instance_model)
+        left_proxy.set_group_role(model.Families)
+        left_view.setModel(left_proxy)
+
+        right_proxy = tree.PluginOrderGroupProxy()
+        right_proxy.setSourceModel(plugin_model)
+        right_proxy.set_group_role(model.Order)
+        right_view.setModel(right_proxy)
 
         instance_combo.setModel(instance_model)
         plugin_combo.setModel(plugin_model)
@@ -420,6 +448,8 @@ class Window(QtWidgets.QDialog):
             w.setAttribute(QtCore.Qt.WA_StyledBackground)
 
         self.data = {
+            "header": header,
+            "body": body,
             "views": {
                 "artist": artist_view,
                 "left": left_view,
@@ -428,6 +458,11 @@ class Window(QtWidgets.QDialog):
             },
             "modals": {
                 "details": details,
+            },
+            "proxies": {
+                "plugins": right_proxy,
+                "instances": left_proxy,
+                "terminal": terminal_proxy
             },
             "models": {
                 "instances": instance_model,
@@ -489,11 +524,26 @@ class Window(QtWidgets.QDialog):
         terminal_tab.toggled.connect(
             lambda: self.on_tab_changed("terminal"))
 
+        left_view.show_perspective.connect(self.toggle_perspective_widget)
+        right_view.show_perspective.connect(self.toggle_perspective_widget)
+
         controller.was_reset.connect(self.on_was_reset)
         controller.was_validated.connect(self.on_was_validated)
         controller.was_published.connect(self.on_was_published)
         controller.was_acted.connect(self.on_was_acted)
         controller.was_finished.connect(self.on_finished)
+
+        controller.was_reset.connect(left_proxy.rebuild)
+        controller.was_validated.connect(left_proxy.rebuild)
+        controller.was_published.connect(left_proxy.rebuild)
+        controller.was_acted.connect(left_proxy.rebuild)
+        controller.was_finished.connect(left_proxy.rebuild)
+
+        controller.was_reset.connect(left_view.expandAll)
+        controller.was_validated.connect(left_view.expandAll)
+        controller.was_published.connect(left_view.expandAll)
+        controller.was_acted.connect(left_view.expandAll)
+        controller.was_finished.connect(left_view.expandAll)
 
         # Discovery happens synchronously during reset, that's
         # why it's important that this connection is triggered
@@ -516,7 +566,6 @@ class Window(QtWidgets.QDialog):
         artist_view.inspected.connect(self.on_item_inspected)
         left_view.inspected.connect(self.on_item_inspected)
         right_view.inspected.connect(self.on_item_inspected)
-        terminal_view.inspected.connect(self.on_item_inspected)
 
         reset.clicked.connect(self.on_reset_clicked)
         validate.clicked.connect(self.on_validate_clicked)
@@ -543,6 +592,18 @@ class Window(QtWidgets.QDialog):
     # Event handlers
     #
     # -------------------------------------------------------------------------
+    def toggle_perspective_widget(self, index=None):
+        show = False
+        self.last_persp_index = None
+        if index:
+            show = True
+            self.last_persp_index = index
+            self.perspective_widget.set_context(index)
+
+        self.data['body'].setVisible(not show)
+        self.data['header'].setVisible(not show)
+
+        self.perspective_widget.setVisible(show)
 
     def on_item_expanded(self, index, state):
         if not index.data(model.IsExpandable):
@@ -642,21 +703,25 @@ class Window(QtWidgets.QDialog):
 
         # Emit signals
         if index.data(model.Type) == "instance":
-            instance = self.data["models"]["instances"].items[index.row()]
-            util.defer(
-                100, lambda: self.controller.emit_(
-                    signal="instanceToggled",
-                    kwargs={"new_value": state,
-                            "old_value": not state,
-                            "instance": instance}))
+            util.defer(100, lambda: self.controller.emit_(
+                signal="instanceToggled",
+                kwargs={
+                    "new_value": state,
+                    "old_value": not state,
+                    "instance": index.data(model.Object)
+                }
+            ))
+            self.update_compatibility()
 
         if index.data(model.Type) == "plugin":
-            util.defer(
-                100, lambda: self.controller.emit_(
-                    signal="pluginToggled",
-                    kwargs={"new_value": state,
-                            "old_value": not state,
-                            "plugin": index.data(model.Object)}))
+            util.defer(100, lambda: self.controller.emit_(
+                signal="pluginToggled",
+                kwargs={
+                    "new_value": state,
+                    "old_value": not state,
+                    "plugin": index.data(model.Object)
+                }
+            ))
 
     def on_tab_changed(self, target):
         for page in self.data["pages"].values():
@@ -694,6 +759,13 @@ class Window(QtWidgets.QDialog):
         self.info("Stopping..")
         self.controller.is_running = False
 
+        buttons = self.data["buttons"]
+        buttons["reset"].show()
+        buttons["play"].hide()
+        buttons["stop"].hide()
+
+        self.on_finished()
+
     def on_comment_entered(self):
         """The user has typed a comment"""
         text_edit = self.findChild(QtWidgets.QWidget, "CommentBox")
@@ -714,11 +786,20 @@ class Window(QtWidgets.QDialog):
             index = instance_model.items.index(instance)
             index = instance_model.createIndex(index, 0)
             instance_model.setData(index, True, model.IsProcessing)
+            # emit layoutChanged to update GUI
+            instance_proxies = self.data["proxies"]["instances"]
+            instance_proxies.layoutChanged.emit()
 
         plugin_model = self.data["models"]["plugins"]
         index = plugin_model.items.index(plugin)
         index = plugin_model.createIndex(index, 0)
+
         plugin_model.setData(index, True, model.IsProcessing)
+
+        # emit layoutChanged to update GUI
+        plugin_proxies = self.data["proxies"]["plugins"]
+        plugin_proxies.layoutChanged.emit()
+
         self.info("%s %s" % (self.tr("Processing"), index.data(model.Label)))
 
     def on_plugin_action_menu_requested(self, pos):
@@ -740,7 +821,7 @@ class Window(QtWidgets.QDialog):
             return
 
         menu = QtWidgets.QMenu(self)
-        plugins_index = self.data["models"]["filter"].mapToSource(index)
+        plugins_index = self.data["proxies"]["plugins"].mapToSource(index)
         plugin = self.data["models"]["plugins"].items[plugins_index.row()]
         print("plugin is: %s" % plugin)
 
@@ -753,18 +834,56 @@ class Window(QtWidgets.QDialog):
 
     def on_was_discovered(self):
         models = self.data["models"]
+        for key, value in self.controller.plugins.items():
+            for plugin in value:
+                models["plugins"].append(plugin)
 
-        for Plugin in self.controller.plugins:
-            models["plugins"].append(Plugin)
+    def update_compatibility(self):
+        models = self.data["models"]
+        proxies = self.data["proxies"]
+
+        instances = models["instances"].items
+        models["plugins"].update_compatibility(
+            self.controller.context, instances
+        )
+        proxies["plugins"].rebuild()
+
+        right_view = self.data['views']['right']
+        right_view_model = right_view.model()
+        for child in right_view_model.root.children():
+            child_idx = right_view_model.createIndex(child.row(), 0, child)
+            right_view.expand(child_idx)
+            any_failed = False
+            all_succeeded = True
+            for plugin_item in child.children():
+                if plugin_item.data(model.IsOptional):
+                    if not plugin_item.data(model.IsChecked):
+                        continue
+                if plugin_item.data(model.HasFailed):
+                    any_failed = True
+                    break
+                if not plugin_item.data(model.HasSucceeded):
+                    all_succeeded = False
+                    break
+            if all_succeeded and not any_failed:
+                right_view.collapse(child_idx)
 
     def on_was_reset(self):
         models = self.data["models"]
 
         self.info(self.tr("Finishing up reset.."))
 
+        context_item = models["instances"].context_item
         models["instances"].reset()
+        models["instances"].append(context_item)
         for instance in self.controller.context:
             models["instances"].append(instance)
+
+        failed = False
+        for index in self.data["models"]["plugins"]:
+            if index.data(model.HasFailed):
+                failed = True
+                break
 
         buttons = self.data["buttons"]
         buttons["play"].show()
@@ -788,25 +907,26 @@ class Window(QtWidgets.QDialog):
         # Refresh tab
         self.on_tab_changed(self.data["tabs"]["current"])
 
-        self.controller.current_error = None
-        self.on_finished()
-
     def on_was_validated(self):
         plugin_model = self.data["models"]["plugins"]
         instance_model = self.data["models"]["instances"]
 
+        failed = False
         for index in plugin_model:
             index.model().setData(index, False, model.IsIdle)
+            if failed:
+                continue
+            if index.data(model.HasFailed):
+                failed = True
 
         for index in instance_model:
             index.model().setData(index, False, model.IsIdle)
 
         buttons = self.data["buttons"]
+        buttons["play"].setVisible(not failed)
+        buttons["validate"].hide()
         buttons["reset"].show()
-        buttons["play"].show()
         buttons["stop"].hide()
-
-        self.on_finished()
 
     def on_was_published(self):
         plugin_model = self.data["models"]["plugins"]
@@ -819,13 +939,13 @@ class Window(QtWidgets.QDialog):
             index.model().setData(index, False, model.IsIdle)
 
         buttons = self.data["buttons"]
+        buttons["play"].hide()
+        buttons["validate"].hide()
         buttons["reset"].show()
         buttons["stop"].hide()
 
         comment_box = self.findChild(QtWidgets.QWidget, "CommentBox")
         comment_box.hide()
-
-        self.on_finished()
 
     def on_was_processed(self, result):
         models = self.data["models"]
@@ -845,9 +965,38 @@ class Window(QtWidgets.QDialog):
                     plugins_filter = self.data["models"]["filter"]
                     plugins_filter.add_inclusion(role="families", value=f)
 
+        error = result.get("error")
+        if error:
+            fname, line_no, func, exc = error.traceback
+
+            # Display errors as log messages too
+            record = logging.LogRecord(
+                name=str(error),
+                level=logging.ERROR,
+                pathname=fname,
+                lineno=line_no,
+                msg=str(error),
+                args=[],
+                exc_info=None,
+                func=func
+            )
+
+            records = result.get("records") or []
+            records.append(record)
+            result["records"] = records
+
+            # Toggle from artist to overview tab on error
+            if self.data["tabs"]["artist"].isChecked():
+                self.data["tabs"]["overview"].toggle()
+
         models["plugins"].update_with_result(result)
         models["instances"].update_with_result(result)
         models["terminal"].update_with_result(result)
+
+        self.data['proxies']['terminal'].rebuild()
+
+        if self.last_persp_index:
+            self.perspective_widget.set_context(self.last_persp_index)
 
     def on_was_acted(self, result):
         buttons = self.data["buttons"]
@@ -864,6 +1013,24 @@ class Window(QtWidgets.QDialog):
         model_.setData(index, False, model.IsProcessing)
 
         models = self.data["models"]
+
+        error = result.get('error')
+        if error:
+            fname, line_no, func, exc = error.traceback
+            records = result.get('records') or []
+
+            records.append({
+                'label': str(error),
+                'type': 'error',
+                'filename': fname,
+                'lineno': line_no,
+                'func': func
+            })
+
+            result['records'] = records
+
+        models["plugins"].update_with_result(result)
+        models["instances"].update_with_result(result)
         models["terminal"].update_with_result(result)
 
         self.on_finished()
@@ -878,6 +1045,7 @@ class Window(QtWidgets.QDialog):
         else:
             self.info(self.tr("Finished successfully!"))
 
+        self.update_compatibility()
     # -------------------------------------------------------------------------
     #
     # Functions
@@ -905,6 +1073,11 @@ class Window(QtWidgets.QDialog):
         comment_box = self.findChild(QtWidgets.QWidget, "CommentBox")
         comment_box.hide()
 
+        # Prepare Context object in controller (create new one)
+        self.controller.prepare_for_reset()
+        # Append context object to instances model
+        self.data["models"]["instances"].append(self.controller.context)
+        # Launch controller reset
         util.defer(500, self.controller.reset)
 
     def validate(self):

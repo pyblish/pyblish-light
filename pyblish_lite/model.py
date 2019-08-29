@@ -23,11 +23,13 @@ Roles:
     as the key of a dictionary, except they can only be integers.
 
 """
-from __future__ import unicode_literals
 
+from __future__ import unicode_literals
 import logging
 
-from . import settings
+import pyblish.logic
+
+from . import settings, util
 from .awesome import tags as awesome
 from .vendor.Qt import QtCore, __binding__
 from .vendor.six import text_type
@@ -50,6 +52,8 @@ Type = QtCore.Qt.UserRole + 10
 Label = QtCore.Qt.DisplayRole + 0
 Families = QtCore.Qt.DisplayRole + 1
 Icon = QtCore.Qt.DisplayRole + 13
+Order = QtCore.Qt.UserRole + 62
+GroupObject = QtCore.Qt.UserRole + 63
 
 # The item has not been used
 IsIdle = QtCore.Qt.UserRole + 2
@@ -60,7 +64,7 @@ IsProcessing = QtCore.Qt.UserRole + 5
 HasFailed = QtCore.Qt.UserRole + 6
 HasSucceeded = QtCore.Qt.UserRole + 7
 HasProcessed = QtCore.Qt.UserRole + 8
-HasWarning = QtCore.Qt.UserRole + 62
+HasWarning = QtCore.Qt.UserRole + 65
 Duration = QtCore.Qt.UserRole + 11
 
 # PLUGINS
@@ -69,8 +73,14 @@ Duration = QtCore.Qt.UserRole + 11
 Actions = QtCore.Qt.UserRole + 9
 ActionIconVisible = QtCore.Qt.UserRole + 13
 ActionIdle = QtCore.Qt.UserRole + 15
-ActionFailed = QtCore.Qt.UserRole + 17
+ActionFailed = QtCore.Qt.UserRole + 14
 Docstring = QtCore.Qt.UserRole + 12
+PathModule = QtCore.Qt.UserRole + 17
+
+HasCompatible = QtCore.Qt.UserRole + 64
+
+LogRecord = QtCore.Qt.UserRole + 40
+ErrorRecord = QtCore.Qt.UserRole + 41
 
 # LOG RECORDS
 
@@ -82,13 +92,15 @@ LogLineNumber = QtCore.Qt.UserRole + 54
 LogMessage = QtCore.Qt.UserRole + 55
 LogMilliseconds = QtCore.Qt.UserRole + 56
 LogLevel = QtCore.Qt.UserRole + 61
+LogSize = QtCore.Qt.UserRole + 66
 
 # EXCEPTIONS
 
-ExcFname = QtCore.Qt.UserRole + 57
-ExcLineNumber = QtCore.Qt.UserRole + 58
+# Duplicates with LogFilename and LogLineNumber
+# ExcFname = QtCore.Qt.UserRole + 57
+# ExcLineNumber = QtCore.Qt.UserRole + 58
 ExcFunc = QtCore.Qt.UserRole + 59
-ExcExc = QtCore.Qt.UserRole + 60
+ExcTraceback = QtCore.Qt.UserRole + 60
 
 
 class Abstract(QtCore.QAbstractListModel):
@@ -108,6 +120,7 @@ class Abstract(QtCore.QAbstractListModel):
                              self.rowCount())
 
         self.items.append(item)
+
         self.endInsertRows()
 
     def rowCount(self, parent=None):
@@ -137,6 +150,7 @@ class Item(Abstract):
             Actions: "actions",
             IsOptional: "optional",
             Icon: "icon",
+            Order: "order",
 
             # GUI-only data
             Type: "_type",
@@ -170,6 +184,19 @@ class Item(Abstract):
                     break
 
 
+def error_from_result(result):
+    error = result.get('error')
+    if error:
+        fname, line_no, func, exc = error.traceback
+        return {
+            'message': str(error),
+            'fname': str(fname),
+            'line_no': str(line_no),
+            'func': str(func)
+        }
+    return {}
+
+
 class Plugin(Item):
     def __init__(self):
         super(Plugin, self).__init__()
@@ -179,6 +206,9 @@ class Plugin(Item):
             Docstring: "__doc__",
             ActionIdle: "_action_idle",
             ActionFailed: "_action_failed",
+            LogRecord: "_log",
+            ErrorRecord: "_error",
+            HasCompatible: "hasCompatible",
             HasWarning: "_has_warning",
         })
 
@@ -203,9 +233,16 @@ class Plugin(Item):
         item._action_succeeded = False
         item._action_failed = False
 
+        item.hasCompatible = True
+
         return super(Plugin, self).append(item)
 
     def data(self, index, role):
+        # This is because of bug without known cause
+        # - on "reset" are called data for already removed indexes
+        if index.row() >= len(self.items):
+            return
+
         item = self.items[index.row()]
 
         if role == Data:
@@ -284,12 +321,12 @@ class Plugin(Item):
 
             return actions
 
+        if role == PathModule:
+            return item.__module__
         key = self.schema.get(role)
         value = getattr(item, key, None) if key is not None else None
-
         if value is None:
             value = super(Plugin, self).data(index, role)
-
         return value
 
     def setData(self, index, value, role):
@@ -305,25 +342,59 @@ class Plugin(Item):
             self.dataChanged.emit(index, index)
         else:
             self.dataChanged.emit(index, index, [role])
+        return True
 
     def update_with_result(self, result, action=False):
         item = result["plugin"]
-
         index = self.items.index(item)
         index = self.createIndex(index, 0)
-        hasWarning = any([record.levelno == logging.WARNING for record in result["records"]])
+
+        has_warning = any([
+            record.levelno == logging.WARNING
+            for record in result["records"]
+        ])
 
         self.setData(index, False, IsIdle)
         self.setData(index, False, IsProcessing)
-        self.setData(index, hasWarning, HasWarning)
+        self.setData(index, has_warning, HasWarning)
         self.setData(index, True, HasProcessed)
         self.setData(index, result["success"], HasSucceeded)
+
+        records = index.data(LogRecord) or []
+        records.extend(result.get('records', []))
+
+        self.setData(index, records, LogRecord)
 
         # Once failed, never go back.
         if not self.data(index, HasFailed):
             self.setData(index, not result["success"], HasFailed)
 
         super(Plugin, self).update_with_result(result)
+
+    def update_compatibility(self, context, instances):
+        families = util.collect_families_from_instances(context, True)
+        for plugin in self.items:
+            has_compatible = False
+            # A plugin should always show if it has processed.
+            if plugin._has_processed:
+                has_compatible = True
+            elif plugin.__instanceEnabled__:
+                compatibleInstances = pyblish.logic.instances_by_plugin(
+                    context, plugin
+                )
+                for instance in instances:
+                    if not instance.data.get("publish"):
+                        continue
+
+                    if instance in compatibleInstances:
+                        has_compatible = True
+                        break
+            else:
+                plugins = pyblish.logic.plugins_by_families([plugin], families)
+                if plugins:
+                    has_compatible = True
+
+            plugin.hasCompatible = has_compatible
 
 
 class Instance(Item):
@@ -333,12 +404,19 @@ class Instance(Item):
         self.ids = []
         self.schema.update({
             IsChecked: "publish",
-
+            LogRecord: "_log",
+            ErrorRecord: "_error",
             # Merge copy of both family and families data members
             Families: "__families__",
         })
+        self.context_item = None
 
     def append(self, item):
+        if item.data.get('_type') == 'context':
+            self.ids.append(item.id)
+            self.context_item = item
+            return super(Instance, self).append(item)
+
         item.data["optional"] = item.data.get("optional", True)
         item.data["publish"] = item.data.get("publish", True)
 
@@ -363,6 +441,10 @@ class Instance(Item):
         return super(Instance, self).append(item)
 
     def data(self, index, role):
+        # This is because of bug without known cause
+        # - on "reset" are called data for already removed indexes
+        if index.row() >= len(self.items):
+            return
         item = self.items[index.row()]
 
         if role == Data:
@@ -397,15 +479,21 @@ class Instance(Item):
         item = result["instance"]
 
         if item is None:
-            return
-
-        index = self.items.index(item)
-        index = self.createIndex(index, 0)
+            # for item in self.
+            index = self.items.index(self.context_item)
+            index = self.createIndex(index, 0)
+        else:
+            index = self.items.index(item)
+            index = self.createIndex(index, 0)
 
         self.setData(index, False, IsIdle)
         self.setData(index, False, IsProcessing)
         self.setData(index, True, HasProcessed)
         self.setData(index, result["success"], HasSucceeded)
+        records = index.data(LogRecord) or []
+        records.extend(result.get('records', []))
+        self.setData(index, records, LogRecord)
+        self.setData(index, error_from_result(result), ErrorRecord)
 
         # Once failed, never go back.
         if not self.data(index, HasFailed):
@@ -424,6 +512,8 @@ class Terminal(Abstract):
             Type: "type",
             Label: "label",
 
+            LogSize: 'size',
+
             # Records
             LogThreadName: "threadName",
             LogName: "name",
@@ -435,10 +525,8 @@ class Terminal(Abstract):
             LogLevel: "levelname",
 
             # Exceptions
-            ExcFname: "fname",
-            ExcLineNumber: "line_number",
             ExcFunc: "func",
-            ExcExc: "exc",
+            ExcTraceback: "traceback",
         }
 
     def data(self, index, role):
@@ -475,11 +563,10 @@ class Terminal(Abstract):
 
     def update_with_result(self, result):
         for record in result["records"]:
-            if record.levelno < settings.TerminalLoglevel:
-                continue
             self.append({
-                "label": text_type(record.msg) % record.args,
+                "label": text_type(record.msg),
                 "type": "record",
+                "levelno": record.levelno,
 
                 # Native
                 "threadName": record.threadName,
@@ -487,21 +574,9 @@ class Terminal(Abstract):
                 "filename": record.filename,
                 "pathname": record.pathname,
                 "lineno": record.lineno,
-                "msg": record.msg,
+                "msg": text_type(record.msg),
                 "msecs": record.msecs,
-                "levelname": record.levelname,
-            })
-
-        error = result["error"]
-        if error is not None:
-            fname, line_no, func, exc = error.traceback
-            self.append({
-                "label": text_type(error),
-                "type": "error",
-                "fname": fname,
-                "line_number": line_no,
-                "func": func,
-                "exc": exc,
+                "levelname": record.levelname
             })
 
 
@@ -667,3 +742,214 @@ class ProxyModel(QtCore.QSortFilterProxyModel):
 
     def rowCount(self, parent=QtCore.QModelIndex()):
         return super(ProxyModel, self).rowCount(parent)
+
+
+class TreeItem(object):
+    """Base class for an Item in the Group By Proxy"""
+    def __init__(self):
+        self._parent = None
+        self._children = list()
+
+    def parent(self):
+        return self._parent
+
+    def addChild(self, node):
+        node._parent = self
+        self._children.append(node)
+
+    def rowCount(self):
+        return len(self._children)
+
+    def row(self):
+
+        parent = self.parent()
+        if not parent:
+            return 0
+        else:
+            return self.parent().children().index(self)
+
+    def columnCount(self):
+        return 1
+
+    def child(self, row):
+        return self._children[row]
+
+    def children(self):
+        return self._children
+
+    def data(self, role=QtCore.Qt.DisplayRole):
+        return None
+
+
+class ProxyTerminalItem(TreeItem):
+    def __init__(self, source_index):
+        self._expanded = False
+        super(ProxyTerminalItem, self).__init__()
+        self.model_index = source_index
+
+    def setIsExpanded(self, in_bool):
+        self._expanded = in_bool
+
+    @property
+    def expanded(self):
+        return self._expanded
+
+    def data(self, role=QtCore.Qt.DisplayRole):
+        if role == QtCore.Qt.DisplayRole:
+            return self.model_index.data(Label)
+
+        elif role == GroupObject:
+            return self
+
+        return self.model_index.data(role)
+
+
+class ProxyTerminalDetail(TreeItem):
+    def __init__(self, source_index):
+        super(ProxyTerminalDetail, self).__init__()
+        self.source_index = source_index
+
+    def data(self, role=QtCore.Qt.DisplayRole):
+        return self.source_index.data(role)
+
+
+class TerminalProxy(QtCore.QAbstractProxyModel):
+    """Proxy that groups by based on a specific role
+    This assumes the source data is a flat list and not a tree.
+    """
+
+    def __init__(self):
+        super(TerminalProxy, self).__init__()
+        self.root = TreeItem()
+
+    def flags(self, index):
+        return (
+            QtCore.Qt.ItemIsEnabled |
+            QtCore.Qt.ItemIsSelectable
+        )
+
+    def rebuild(self):
+        """Update proxy sections and items
+        This should be called after changes in the source model that require
+        changes in this list (for example new indices, less indices or update
+        sections)
+        """
+        self.beginResetModel()
+        # Start with new root node
+        self.root = TreeItem()
+
+        # Get indices from source model
+        source = self.sourceModel()
+        source_rows = source.rowCount()
+        source_indexes = [source.index(i, 0) for i in range(source_rows)]
+
+        for index in source_indexes:
+            log_label = ProxyTerminalItem(index)
+            if index.data(LogMessage) or index.data(Type) == "error":
+                log_item = ProxyTerminalDetail(index)
+                log_label.addChild(log_item)
+            self.root.addChild(log_label)
+
+        self.endResetModel()
+
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if not index.isValid():
+            return
+
+        node = index.internalPointer()
+
+        if not node:
+            return
+
+        return node.data(role)
+
+    def setData(self, in_index, data, role):
+        source_idx = self.mapToSource(in_index)
+        if not source_idx.isValid():
+            return
+
+        source_model = source_idx.model()
+        node = in_index.internalPointer()
+
+        if not node:
+            return
+
+        index = node.source_index
+        source_model.setData(index, data, role)
+
+        if __binding__ in ("PyQt4", "PySide"):
+            self.dataChanged.emit(index, index)
+        else:
+            self.dataChanged.emit(index, index, [role])
+        self.layoutChanged.emit()
+
+    def is_header(self, index):
+        """Return whether index is a header"""
+        if index.isValid() and index.data(GroupObject):
+            return True
+        else:
+            return False
+
+    def mapFromSource(self, index):
+        for section_item in self.root.children():
+            for item in section_item.children():
+                if item.source_index == index:
+                    return self.createIndex(
+                        item.row(), index.column(), item
+                    )
+
+        return QtCore.QModelIndex()
+
+    def mapToSource(self, index):
+        if not index.isValid():
+            return QtCore.QModelIndex()
+
+        node = index.internalPointer()
+        if not node:
+            return QtCore.QModelIndex()
+
+        if not hasattr(node, "source_index"):
+            return QtCore.QModelIndex()
+        return node.source_index
+
+    def columnCount(self, parent=QtCore.QModelIndex()):
+        return 1
+
+    def rowCount(self, parent):
+
+        if not parent.isValid():
+            node = self.root
+        else:
+            node = parent.internalPointer()
+
+        if not node:
+            return 0
+
+        return node.rowCount()
+
+    def index(self, row, column, parent):
+        if parent and parent.isValid():
+            parent_node = parent.internalPointer()
+        else:
+            parent_node = self.root
+
+        item = parent_node.child(row)
+        if item:
+            return self.createIndex(row, column, item)
+        else:
+            return QtCore.QModelIndex()
+
+    def parent(self, index):
+        if not index.isValid():
+            return QtCore.QModelIndex()
+
+        node = index.internalPointer()
+        if not node:
+            return QtCore.QModelIndex()
+        else:
+            parent = node.parent()
+            if not parent:
+                return QtCore.QModelIndex()
+
+            row = parent.row()
+            return self.createIndex(row, 0, parent)

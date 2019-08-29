@@ -7,6 +7,7 @@ from .awesome import tags as awesome
 
 colors = {
     "failed": QtGui.QColor("#ff4a4a"),
+    "warning": QtGui.QColor("#ffa700"),
     "ok": QtGui.QColor("#77AE24"),
     "active": QtGui.QColor("#99CEEE"),
     "idle": QtCore.Qt.white,
@@ -15,7 +16,7 @@ colors = {
     "hover": QtGui.QColor(255, 255, 255, 10),
     "selected": QtGui.QColor(255, 255, 255, 20),
     "outline": QtGui.QColor("#333"),
-    "warning": QtGui.QColor("#ffa700"),
+    "group_bg": QtGui.QColor("#333"),
 }
 
 record_colors = {
@@ -32,6 +33,8 @@ fonts = {
     "h3": QtGui.QFont("Open Sans", 10 * scale_factor, 900),
     "h4": QtGui.QFont("Open Sans", 8 * scale_factor, 400),
     "h5": QtGui.QFont("Open Sans", 8 * scale_factor, 800),
+    "awesome6": QtGui.QFont("FontAwesome", 6 * scale_factor),
+    "awesome10": QtGui.QFont("FontAwesome", 10 * scale_factor),
     "smallAwesome": QtGui.QFont("FontAwesome", 8 * scale_factor),
     "largeAwesome": QtGui.QFont("FontAwesome", 16 * scale_factor),
 }
@@ -42,6 +45,10 @@ icons = {
     "file": awesome["file"],
     "error": awesome["exclamation-triangle"],
     "action": awesome["adn"],
+    "angle-right": awesome["angle-right"],
+    "angle-left": awesome["angle-left"],
+    "plus-sign": awesome['plus'],
+    "minus-sign": awesome['minus']
 }
 
 
@@ -51,17 +58,28 @@ class Item(QtWidgets.QStyledItemDelegate):
     def paint(self, painter, option, index):
         """Paint checkbox and text
          _
-        |_|  My label
+        |_|  My label    >
 
         """
 
         body_rect = QtCore.QRectF(option.rect)
 
         check_rect = QtCore.QRectF(body_rect)
+
+        check_rect = QtCore.QRectF(body_rect)
         check_rect.setWidth(check_rect.height())
         check_rect.adjust(6, 6, -6, -6)
 
         check_color = colors["idle"]
+
+        perspective_icon = icons["angle-right"]
+        perspective_rect = QtCore.QRectF(body_rect)
+        perspective_rect.setWidth(perspective_rect.height())
+        perspective_rect.adjust(0, 3, 0, 0)
+        perspective_rect.translate(
+            body_rect.width()-(perspective_rect.width()/2+2),
+            0
+        )
 
         if index.data(model.IsProcessing) is True:
             check_color = colors["active"]
@@ -97,6 +115,11 @@ class Item(QtWidgets.QStyledItemDelegate):
         # Maintain reference to state, so we can restore it once we're done
         painter.save()
 
+        # Draw perspective icon
+        painter.setFont(fonts["awesome10"])
+        painter.setPen(QtGui.QPen(font_color))
+        painter.drawText(perspective_rect, perspective_icon)
+
         # Draw label
         painter.setFont(fonts["h4"])
         painter.setPen(QtGui.QPen(font_color))
@@ -119,9 +142,11 @@ class Item(QtWidgets.QStyledItemDelegate):
             painter.setPen(QtGui.QPen(color))
 
             icon_rect = QtCore.QRectF(option.rect.adjusted(
-                label_rect.width() + 1, label_rect.height() / 3, 0, 0))
-            painter.drawText(icon_rect, icons["action"])
+                label_rect.width() - perspective_rect.width() / 2,
+                label_rect.height() / 3, 0, 0)
+            )
 
+            painter.drawText(icon_rect, icons["action"])
             painter.restore()
 
         # Draw checkbox
@@ -135,7 +160,9 @@ class Item(QtWidgets.QStyledItemDelegate):
                 painter.fillRect(check_rect, check_color)
 
         elif not index.data(model.IsIdle) and index.data(model.IsChecked):
-                painter.fillRect(check_rect, check_color)
+            painter.fillRect(check_rect, check_color)
+        else:
+            painter.fillRect(check_rect, colors["inactive"])
 
         if option.state & QtWidgets.QStyle.State_MouseOver:
             painter.fillRect(body_rect, colors["hover"])
@@ -150,17 +177,97 @@ class Item(QtWidgets.QStyledItemDelegate):
         return QtCore.QSize(option.rect.width(), 20)
 
 
+class Section(QtWidgets.QStyledItemDelegate):
+    """Generic delegate for section header"""
+
+    def paint(self, painter, option, index):
+        """Paint text
+         _
+        My label
+        """
+        body_rect = QtCore.QRectF(option.rect)
+        bg_rect = QtCore.QRectF(
+            body_rect.left(), body_rect.top()+1,
+            body_rect.width()-5, body_rect.height()-2
+        )
+        radius = 7.0
+        bg_path = QtGui.QPainterPath()
+        bg_path.addRoundedRect(bg_rect, radius, radius)
+        painter.fillPath(bg_path, colors['group_bg'])
+
+        metrics = painter.fontMetrics()
+
+        expander_rect = QtCore.QRectF(body_rect)
+        expander_rect.setWidth(expander_rect.height())
+        expander_rect.adjust(6, 6, -8, -2)
+
+        expander_color = colors["idle"]
+
+        label_rect = QtCore.QRectF(option.rect.adjusted(
+            expander_rect.width() + 12, 2, 0, -2
+        ))
+
+        assert label_rect.width() > 0
+
+        expander_icon = icons['plus-sign']
+        group = index.data(model.GroupObject)
+        if group.expanded:
+            expander_icon = icons['minus-sign']
+        label = index.data(model.Label)
+        label = metrics.elidedText(
+            label, QtCore.Qt.ElideRight, label_rect.width()
+        )
+
+        font_color = colors["idle"]
+
+        # Maintain reference to state, so we can restore it once we're done
+        painter.save()
+
+        painter.setFont(fonts['awesome6'])
+        painter.setPen(QtGui.QPen(expander_color))
+        painter.drawText(expander_rect, expander_icon)
+
+        # Draw label
+        painter.setFont(fonts["h4"])
+        painter.setPen(QtGui.QPen(font_color))
+        painter.drawText(label_rect, label)
+
+        if option.state & QtWidgets.QStyle.State_MouseOver:
+            painter.fillPath(bg_path, colors["hover"])
+
+        if option.state & QtWidgets.QStyle.State_Selected:
+            painter.fillPath(bg_path, colors["selected"])
+
+        # Ok, we're done, tidy up.
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QtCore.QSize(option.rect.width(), 20)
+
+
+class ItemAndSection(Item):
+    """Generic delegate for model items in proxy tree view"""
+    def paint(self, painter, option, index):
+
+        index_model = index.model()
+        if index_model.is_header(index):
+            Section().paint(painter, option, index)
+            return
+
+        super(ItemAndSection, self).paint(painter, option, index)
+
+
 class Artist(QtWidgets.QStyledItemDelegate):
     """Delegate used on Artist page"""
 
     def paint(self, painter, option, index):
         """Paint checkbox and text
 
-         _________________________________________
-        |       |  label              | duration  |
-        |toggle |_____________________|           |
-        |       |  families           |           |
-        |_______|_____________________|___________|
+         _______________________________________________
+        |       |  label              | duration  |arrow|
+        |toggle |_____________________|           | to  |
+        |       |  families           |           |persp|
+        |_______|_____________________|___________|_____|
 
         """
 
@@ -191,6 +298,14 @@ class Artist(QtWidgets.QStyledItemDelegate):
         families_rect = QtCore.QRectF(label_rect)
         families_rect.translate(0, label_rect.height())
 
+        perspective_rect = QtCore.QRectF(body_rect)
+        perspective_rect.setWidth(35)
+        perspective_rect.setHeight(35)
+        perspective_rect.translate(
+            content_rect.width()-(perspective_rect.width()/2)+10,
+            (content_rect.height()/2)-(perspective_rect.height()/2)
+        )
+
         # Colors
         check_color = colors["idle"]
 
@@ -207,8 +322,12 @@ class Artist(QtWidgets.QStyledItemDelegate):
             check_color = colors["ok"]
 
         icon = index.data(model.Icon) or icons["file"]
+        perspective_icon = icons["angle-right"]
         label = index.data(model.Label)
+
         families = ", ".join(index.data(model.Families))
+        if families == '__context__':
+            families = 'Context'
 
         # Elide
         label = metrics.elidedText(label,
@@ -223,6 +342,15 @@ class Artist(QtWidgets.QStyledItemDelegate):
         if not index.data(model.IsChecked):
             font_color = colors["inactive"]
 
+        perspective_color = colors['inactive']
+        if (
+            option.state &
+            (
+                QtWidgets.QStyle.State_MouseOver or
+                QtWidgets.QStyle.State_Selected
+            )
+        ):
+            perspective_color = colors['idle']
         # Maintan reference to state, so we can restore it once we're done
         painter.save()
 
@@ -242,6 +370,10 @@ class Artist(QtWidgets.QStyledItemDelegate):
         painter.setPen(QtGui.QPen(colors["inactive"]))
         painter.drawText(families_rect, families)
 
+        painter.setFont(fonts["largeAwesome"])
+        painter.setPen(QtGui.QPen(perspective_color))
+        painter.drawText(perspective_rect, perspective_icon)
+
         # Draw checkbox
         pen = QtGui.QPen(check_color, 1)
         painter.setPen(pen)
@@ -253,7 +385,7 @@ class Artist(QtWidgets.QStyledItemDelegate):
                 painter.fillRect(toggle_rect, check_color)
 
         elif not index.data(model.IsIdle) and index.data(model.IsChecked):
-                painter.fillRect(toggle_rect, check_color)
+            painter.fillRect(toggle_rect, check_color)
 
         if option.state & QtWidgets.QStyle.State_MouseOver:
             painter.fillRect(body_rect, colors["hover"])
@@ -271,8 +403,9 @@ class Artist(QtWidgets.QStyledItemDelegate):
         return QtCore.QSize(option.rect.width(), 80)
 
 
-class Terminal(QtWidgets.QStyledItemDelegate):
+class TerminalItem(QtWidgets.QStyledItemDelegate):
     """Delegate used exclusively for the Terminal"""
+    HEIGHT = 20
 
     def paint(self, painter, option, index):
         """Paint text"""
@@ -280,8 +413,8 @@ class Terminal(QtWidgets.QStyledItemDelegate):
         icon_rect = QtCore.QRectF(option.rect).adjusted(3, 3, -3, -3)
         icon_rect.setWidth(14)
         icon_rect.setHeight(14)
-
         icon_color = colors["idle"]
+
         icon = icons[index.data(model.Type)]
 
         if index.data(model.Type) == "record":
@@ -298,9 +431,9 @@ class Terminal(QtWidgets.QStyledItemDelegate):
         assert label_rect.width() > 0
 
         label = index.data(model.Label)
-        label = metrics.elidedText(label,
-                                   QtCore.Qt.ElideRight,
-                                   label_rect.width() - 20)
+        label = metrics.elidedText(
+            label, QtCore.Qt.ElideRight, label_rect.width() - 20
+        )
 
         font_color = colors["idle"]
 
@@ -330,4 +463,124 @@ class Terminal(QtWidgets.QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option, index):
-        return QtCore.QSize(option.rect.width(), 20)
+        return QtCore.QSize(option.rect.width(), self.HEIGHT)
+
+
+class TerminalDetail(QtWidgets.QStyledItemDelegate):
+    """Delegate used exclusively for the Terminal"""
+
+    show_roles = {
+        model.QtCore.Qt.DisplayRole: 'Message',
+        model.LogName: 'Plugin',
+        model.LogPath: 'Path',
+        model.LogLineNumber: 'Line',
+        model.ExcTraceback: 'Traceback',
+        model.LogLevel: 'Level',
+        model.LogThreadName: 'Thread',
+        model.LogMilliseconds: 'Millis'
+    }
+
+    def paint(self, painter, option, index):
+        """Paint text"""
+        html_text = ''
+        for role, title in self.show_roles.items():
+            text = index.model().data(index, role)
+            # TODO Fix this issue:
+            # Maya and Nuke have LogFilename and LogPath in strange str object.
+            # When printed, empty string is show and value is equal to <string>
+            if not text:
+                continue
+
+            text = str(text).replace('\n', '<br/>').replace(' ', '&nbsp;')
+
+            title_tag = (
+                '<span style=\" font-size:8pt; font-weight:600;'
+                # ' background-color:#bbb; color:#333;\" >{}:</span> '
+                ' color:#fff;\" >{}:</span> '
+            ).format(title)
+
+            html_text += (
+                '<tr><td width="100%" align=left>{}</td></tr>'
+                '<tr><td width="100%">{}</td></tr>'
+            ).format(title_tag, text)
+
+        html_text = '<table width="100%" cellspacing="3">{}</table>'.format(
+            html_text
+        )
+        document = QtGui.QTextDocument()
+        document.setHtml(html_text)
+        document.setTextWidth(option.rect.width())
+
+        painter.save()
+
+        font_color = QtGui.QColor("#aaa")
+        bg_color = QtGui.QColor("#333")
+
+        if (
+            option.state & QtWidgets.QStyle.State_MouseOver and
+            option.state & QtWidgets.QStyle.State_Selected
+        ):
+            bg_color = QtGui.QColor("#353535")
+
+        elif option.state & QtWidgets.QStyle.State_MouseOver:
+            bg_color = QtGui.QColor("#3b3b3b")
+
+        elif option.state & QtWidgets.QStyle.State_Selected:
+            bg_color = QtGui.QColor("#303030")
+
+        # Rounded corners of background rectangle
+        radius = 7.0
+        bg_path = QtGui.QPainterPath()
+        bg_path.addRoundedRect(QtCore.QRectF(option.rect), radius, radius)
+        painter.fillPath(bg_path, bg_color)
+
+        painter.translate(option.rect.x(), option.rect.y())
+
+        # Set default color for text
+        ctx = QtGui.QAbstractTextDocumentLayout.PaintContext()
+        ctx.palette.setColor(QtGui.QPalette.Text, font_color)
+        document.documentLayout().draw(painter, ctx)
+
+        painter.restore()
+
+        # Store height of detail to index data for sizeHint
+        log_size = QtCore.QSize(
+            document.idealWidth(),
+            document.size().height()
+        )
+        index.model().setData(index, log_size, model.LogSize)
+
+    def sizeHint(self, option, index):
+        size = index.data(model.LogSize)
+        if size:
+            return size
+
+        # This part is for cases when height is not set yet (not work correct)
+        text = index.model().data(index, QtCore.Qt.DisplayRole)
+
+        document = QtGui.QTextDocument()
+        document.setPlainText(text)
+        document.setTextWidth(option.rect.width())
+
+        return QtCore.QSize(document.idealWidth(), document.size().height())
+
+
+class LogsAndDetails(TerminalDetail):
+    """Generic delegate for model items in proxy tree view"""
+    HEIGHT = TerminalItem.HEIGHT
+
+    def paint(self, painter, option, index):
+
+        index_model = index.model()
+        if index_model.is_header(index):
+            TerminalItem().paint(painter, option, index)
+            return
+
+        super(LogsAndDetails, self).paint(painter, option, index)
+
+    def sizeHint(self, option, index):
+        index_model = index.model()
+        if index_model.is_header(index):
+            return TerminalItem().sizeHint(option, index)
+
+        return super(LogsAndDetails, self).sizeHint(option, index)
